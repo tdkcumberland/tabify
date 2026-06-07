@@ -23,6 +23,7 @@ from tabify import (
     ONSET_THRESHOLD,
     FRAME_THRESHOLD,
     MIN_NOTE_LENGTH,
+    CHORD_WINDOW,
 )
 
 # ── Audio capture settings ────────────────────────────────────────────────────
@@ -111,6 +112,15 @@ def main():
                         help="Disable pitch bends (cleaner MIDI, less expressive)")
     parser.add_argument("--denoise",  action="store_true",
                         help="Apply spectral gating to remove background noise")
+    parser.add_argument("--chord-window",  type=float, default=CHORD_WINDOW,
+                        help=f"Chord quantization window ms (default {CHORD_WINDOW}ms). "
+                             "Set to 0 to disable.")
+    parser.add_argument("--no-dedup",        action="store_true",
+                        help="Disable duplicate note removal")
+    parser.add_argument("--no-fix-overlaps", action="store_true",
+                        help="Disable same-pitch overlap resolution")
+    parser.add_argument("--no-detect-tempo", action="store_true",
+                        help="Disable BPM detection (MIDI will use default 120 BPM grid)")
     parser.add_argument("--no-gate", action="store_true",
                         help="Disable noise gate (on by default for mic input)")
     parser.add_argument("--gate-threshold", type=float, default=GATE_THRESHOLD,
@@ -122,11 +132,15 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
 
     params = {
-        "onset":    args.onset,
-        "frame":    args.frame,
-        "min_note": args.min_note,
-        "no_bends": args.no_bends,
-        "denoise":  args.denoise,
+        "onset":         args.onset,
+        "frame":         args.frame,
+        "min_note":      args.min_note,
+        "no_bends":      args.no_bends,
+        "denoise":       args.denoise,
+        "chord_window":  args.chord_window,
+        "dedup":         not args.no_dedup,
+        "fix_overlaps":  not args.no_fix_overlaps,
+        "detect_tempo":  not args.no_detect_tempo,
     }
 
     device_name = get_default_device_name()

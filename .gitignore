@@ -2,6 +2,7 @@
 **/*.wav
 
 tabify_old.py
+tabify-live_old.py
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
