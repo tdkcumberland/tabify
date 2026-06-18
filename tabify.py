@@ -23,6 +23,9 @@ MIN_FREQ          = 82.41   # Hz = E2 (open low E string)
 MAX_FREQ          = 1318.5  # Hz = E6 (practical guitar ceiling)
 CHORD_WINDOW      = 50.0    # ms. Notes within this window are snapped to the same onset.
                             # Collapses fast arpeggio sweeps into chords. 0 = disabled.
+MAX_NOTE_BEATS    = 1.0     # beats. Maximum note duration relative to detected BPM.
+                            # Prevents sustained notes from bleeding into subsequent bars.
+                            # Falls back to 500ms if tempo detection is disabled.
 
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -105,28 +108,44 @@ def resolve_overlaps(notes: list) -> tuple:
     return notes, resolved
 
 
-def detect_tempo(audio_path: str, midi_data) -> tuple:
-    """Detect BPM from audio and rebuild MIDI with the correct initial tempo.
+def clip_note_lengths(notes: list, bpm: float, max_beats: float) -> tuple:
+    """Cap note duration to max_beats relative to detected BPM.
 
-    pretty_midi note times are always in seconds, so copying notes into a
-    new PrettyMIDI with a different initial_tempo is safe — the note
-    positions don't change, only how GP6 lays them on the beat grid.
+    Prevents sustained notes from bleeding into subsequent bars.
+    max_duration_sec = (60 / bpm) * max_beats
 
-    Returns (new midi_data with correct tempo, detected bpm float).
+    Returns (modified notes list, number of notes clipped).
     """
-    import librosa
-    import pretty_midi
+    max_sec = (60.0 / bpm) * max_beats
+    clipped = 0
+    for note in notes:
+        if (note.end - note.start) > max_sec:
+            note.end = note.start + max_sec
+            clipped += 1
+    return notes, clipped
 
+
+def detect_tempo(audio_path: str) -> float:
+    """Detect BPM from audio. Returns bpm as float."""
+    import librosa
     y, sr = librosa.load(audio_path, sr=None, mono=True)
     tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
-    bpm = float(tempo)
+    return float(tempo)
 
+
+def apply_tempo_to_midi(midi_data, bpm: float):
+    """Rebuild PrettyMIDI with correct initial_tempo.
+
+    Note times are in seconds so positions are unaffected —
+    only the beat grid GP8 displays changes.
+    """
+    import pretty_midi
     new_midi = pretty_midi.PrettyMIDI(
         initial_tempo=bpm,
         resolution=midi_data.resolution,
     )
     new_midi.instruments = midi_data.instruments
-    return new_midi, bpm
+    return new_midi
 
 
 def transcribe(input_path: Path, output_path: Path, params: dict) -> None:
@@ -180,6 +199,13 @@ def transcribe(input_path: Path, output_path: Path, params: dict) -> None:
 
     single_track.notes.sort(key=lambda x: x.start)
 
+    # ── Tempo detection (before post-processing so BPM is available) ─────────
+    FALLBACK_BPM = 120.0
+    if params["detect_tempo"]:
+        bpm = detect_tempo(actual_audio_path)
+    else:
+        bpm = FALLBACK_BPM
+
     # ── Post-processing ───────────────────────────────────────────────────────
     print(f"[2/3] Post-processing...")
 
@@ -198,14 +224,21 @@ def transcribe(input_path: Path, output_path: Path, params: dict) -> None:
         single_track.notes, overlaps = resolve_overlaps(single_track.notes)
         print(f"      overlap resolution  → {overlaps} overlap(s) fixed")
 
+    # Note length cap
+    if params["max_note"]:
+        single_track.notes, clipped = clip_note_lengths(single_track.notes, bpm, MAX_NOTE_BEATS)
+        print(f"      note length cap     → {clipped} note(s) clipped  "
+              f"(max {MAX_NOTE_BEATS} beat @ {bpm:.1f} BPM = "
+              f"{(60.0 / bpm) * MAX_NOTE_BEATS * 1000:.0f}ms)")
+
     # ─────────────────────────────────────────────────────────────────────────
 
     midi_data.instruments = [single_track]
 
-    # Tempo detection (rebuilds midi_data with correct BPM)
+    # Apply detected BPM to MIDI header
     if params["detect_tempo"]:
-        midi_data, bpm = detect_tempo(actual_audio_path, midi_data)
-        print(f"      tempo detection     → {bpm:.1f} BPM")
+        midi_data = apply_tempo_to_midi(midi_data, bpm)
+        print(f"      tempo              → {bpm:.1f} BPM")
 
     print(f"[3/3] Writing MIDI: {output_path.name}")
     midi_data.write(str(output_path))
@@ -241,6 +274,8 @@ def main():
                         help="Disable same-pitch overlap resolution")
     parser.add_argument("--no-detect-tempo", action="store_true",
                         help="Disable BPM detection (MIDI will use default 120 BPM grid)")
+    parser.add_argument("--no-max-note",     action="store_true",
+                        help=f"Disable note length cap (default: {MAX_NOTE_BEATS} beat per note)")
     args = parser.parse_args()
 
     input_path  = Path(args.input)
@@ -260,6 +295,7 @@ def main():
         "dedup":         not args.no_dedup,
         "fix_overlaps":  not args.no_fix_overlaps,
         "detect_tempo":  not args.no_detect_tempo,
+        "max_note":      not args.no_max_note,
     }
 
     transcribe(input_path, output_path, params)
