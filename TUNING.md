@@ -52,7 +52,7 @@ python tabify.py song.wav \
 
 **Tremolo:** Four notes per beat at tempo — Basic Pitch may merge or drop alternating ones. Expect manual cleanup on tremolo passages.
 
-**Harmonics:** Natural harmonics at the 12th fret transcribe reasonably. Artificial harmonics often register an octave off or are missed entirely — flag for manual correction in GP6.
+**Harmonics:** Natural harmonics at the 12th fret transcribe reasonably. Artificial harmonics often register an octave off or are missed entirely — flag for manual correction in GP8.
 
 ---
 
@@ -160,7 +160,7 @@ Only relevant once the notes are detected. Adjust if inner voices that should la
 
 ### Tuning Ladder
 
-Run the same 15–20 second dense polyphonic excerpt repeatedly. Compare in GP6 after each step.
+Run the same 15–20 second dense polyphonic excerpt repeatedly. Compare in GP8 after each step.
 
 ```bash
 # Baseline
@@ -178,3 +178,42 @@ python tabify.py excerpt.wav --onset 0.5 --frame 0.35 --min-note 60
 # Step 4 — go further only if still missing notes (noise will increase)
 python tabify.py excerpt.wav --onset 0.45 --frame 0.3 --min-note 60
 ```
+
+---
+
+## Post-processing Tuning
+
+Post-processing runs after transcription on the raw note list. These parameters don't affect what Basic Pitch detects — they clean up and correct what it already found.
+
+### `--chord-window` — collapsing arpeggios into chords
+
+The most impactful post-processing parameter for fingerstyle. Start here after setting onset and frame.
+
+- If GP8 shows a chord as a series of eighth or sixteenth notes instead of a single strummed event, raise the window.
+- If single-note runs are being grouped into chords, lower it.
+- The right value varies by recording tempo and playing style. 50ms works for most fingerstyle; 30ms for classical; 20ms for flamenco.
+
+### `--no-max-note` — controlling tied notes across bars
+
+The note length cap is the primary fix for notes that sustain across bar lines and render as long tied notes in GP8. Basic Pitch tracks the full acoustic decay of each note — including reverb tails — not just the struck duration.
+
+The cap is tied to detected BPM so it scales correctly:
+
+| BPM | Max note duration |
+|---|---|
+| 70 | 857ms |
+| 80 | 750ms |
+| 100 | 600ms |
+| 120 | 500ms |
+| 140 | 429ms |
+| 160 | 375ms |
+
+If you are still seeing tied notes after the default 1-beat cap, it means tempo detection found the wrong BPM. Check the reported BPM in the terminal output and verify it against the actual song tempo. If it is wrong, either correct it manually in GP8 or pass `--no-detect-tempo` and accept the 120 BPM fallback, then fix the grid in GP8 directly.
+
+### `--no-fix-overlaps` — same-pitch overlap artifacts
+
+Reverb causes Basic Pitch to see a note still ringing when a new strike of the same pitch occurs. In GP8 this shows as two consecutive notes of the same pitch where the first should have ended. Overlap resolution truncates the first to where the second begins. This almost always improves the output — disable only for diagnostic comparison.
+
+### `--no-dedup` — duplicate notes after quantization
+
+Duplicate removal is a cleanup step downstream of chord quantization. If chord-window snaps two notes of the same pitch to the same onset, you get a stacked duplicate in GP8. This has no musical value. Leave it on unless you are diagnosing a specific issue.
