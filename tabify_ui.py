@@ -12,6 +12,7 @@ transcribe(). Until then it's accepted but silently ignored.
 
 import os
 import sys
+import json
 import queue
 import threading
 import traceback
@@ -106,11 +107,40 @@ OPTION_SPECS = [
      "durations are musically correct."),
 ]
 
-PRESETS = {
+DEFAULT_PRESETS = {
     "Classical":   {"onset": 0.5,  "frame": 0.3,  "min_note": 60, "chord_window": 30, "no_bends": True},
     "Flamenco":    {"onset": 0.65, "frame": 0.45, "min_note": 40, "chord_window": 20, "no_bends": True},
     "Fingerstyle": {"onset": 0.6,  "frame": 0.4,  "min_note": 80, "chord_window": 50, "no_bends": False},
 }
+
+
+def _presets_path() -> Path:
+    """presets.json lives next to the script, or next to the .exe once frozen
+    via PyInstaller — __file__ points into a temp dir for a onefile build,
+    which would silently lose saved presets between runs."""
+    if getattr(sys, "frozen", False):
+        base = Path(sys.executable).parent
+    else:
+        base = Path(__file__).resolve().parent
+    return base / "presets.json"
+
+
+def load_presets() -> dict:
+    path = _presets_path()
+    if path.exists():
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, OSError):
+            pass
+    save_presets(DEFAULT_PRESETS)
+    return dict(DEFAULT_PRESETS)
+
+
+def save_presets(presets: dict) -> None:
+    path = _presets_path()
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(presets, f, indent=2)
 
 
 class QueueWriter:
@@ -143,6 +173,7 @@ class TabifyUI:
 
         self.tune_vars = {}   # key -> {"value", "text", "lo", "hi", "decimals", "scale", "entry"}
         self.opt_vars = {}    # key -> BooleanVar
+        self.presets = load_presets()
 
         self.info_var = tk.StringVar(
             value="Click the ⓘ next to any parameter to see what it does."
@@ -183,9 +214,14 @@ class TabifyUI:
         row = ttk.Frame(main)
         row.pack(fill="x", **pad)
         ttk.Label(row, text="Presets", width=12).pack(side="left")
-        for name in PRESETS:
-            ttk.Button(row, text=name, command=lambda n=name: self._apply_preset(n)).pack(
-                side="left", padx=3)
+        self.preset_var = tk.StringVar()
+        self.preset_combo = ttk.Combobox(
+            row, textvariable=self.preset_var, state="readonly", width=24)
+        self.preset_combo.pack(side="left")
+        self.preset_combo.bind("<<ComboboxSelected>>", self._on_preset_selected)
+        ttk.Button(row, text="Save as new preset…", command=self._open_save_preset_dialog).pack(
+            side="left", padx=(10, 0))
+        self._refresh_preset_list()
 
         ttk.Label(main, text="Tunable parameters", foreground="#666666").pack(
             anchor="w", padx=10, pady=(10, 2))
@@ -305,7 +341,7 @@ class TabifyUI:
         row["entry"].configure(state=widget_state)
 
     def _apply_preset(self, name):
-        preset = PRESETS[name]
+        preset = self.presets[name]
         for key, val in preset.items():
             if key in self.tune_vars:
                 state = self.tune_vars[key]
@@ -315,9 +351,60 @@ class TabifyUI:
                 state["scale"].set(v)
             elif key in self.opt_vars:
                 self.opt_vars[key].set(val)
-        self.info_var.set(
-            f"Applied {name} preset (onset / frame / min-note / chord-window / no-bends)."
-        )
+        self.info_var.set(f"Applied '{name}' preset.")
+
+    def _refresh_preset_list(self):
+        self.preset_combo.configure(values=list(self.presets.keys()))
+
+    def _on_preset_selected(self, event=None):
+        name = self.preset_var.get()
+        if name:
+            self._apply_preset(name)
+
+    def _snapshot_current_params(self) -> dict:
+        snapshot = {key: state["value"].get() for key, state in self.tune_vars.items()}
+        snapshot.update({key: var.get() for key, var in self.opt_vars.items()})
+        return snapshot
+
+    def _open_save_preset_dialog(self):
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Save Preset")
+        dialog.transient(self.root)
+        dialog.resizable(False, False)
+        dialog.grab_set()
+
+        ttk.Label(dialog, text="Preset name:").pack(padx=12, pady=(12, 4), anchor="w")
+        name_var = tk.StringVar()
+        entry = ttk.Entry(dialog, textvariable=name_var, width=30)
+        entry.pack(padx=12, pady=(0, 12), fill="x")
+        entry.focus_set()
+
+        btn_row = ttk.Frame(dialog)
+        btn_row.pack(padx=12, pady=(0, 12), fill="x")
+
+        def confirm():
+            name = name_var.get().strip()
+            if not name:
+                messagebox.showerror("Save Preset", "Enter a preset name.", parent=dialog)
+                return
+            if name in self.presets and not messagebox.askyesno(
+                    "Save Preset", f"A preset named '{name}' already exists. Overwrite?",
+                    parent=dialog):
+                return
+            self.presets[name] = self._snapshot_current_params()
+            save_presets(self.presets)
+            self._refresh_preset_list()
+            self.preset_var.set(name)
+            dialog.destroy()
+
+        def cancel():
+            dialog.destroy()
+
+        ttk.Button(btn_row, text="Cancel", command=cancel).pack(side="right")
+        ttk.Button(btn_row, text="Save", command=confirm).pack(side="right", padx=(0, 6))
+
+        entry.bind("<Return>", lambda e: confirm())
+        dialog.bind("<Escape>", lambda e: cancel())
 
     # ── file & dir handling ────────────────────────────────────────────
 

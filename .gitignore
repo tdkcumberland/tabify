@@ -1,5 +1,6 @@
 **/*.mid
 **/*.wav
+**/*_old.py
 
 /tabs
 
