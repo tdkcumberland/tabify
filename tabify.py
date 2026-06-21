@@ -226,10 +226,11 @@ def transcribe(input_path: Path, output_path: Path, params: dict) -> None:
 
     # Note length cap
     if params["max_note"]:
-        single_track.notes, clipped = clip_note_lengths(single_track.notes, bpm, MAX_NOTE_BEATS)
+        max_beats = params.get("max_note_beats", MAX_NOTE_BEATS)
+        single_track.notes, clipped = clip_note_lengths(single_track.notes, bpm, max_beats)
         print(f"      note length cap     → {clipped} note(s) clipped  "
-              f"(max {MAX_NOTE_BEATS} beat @ {bpm:.1f} BPM = "
-              f"{(60.0 / bpm) * MAX_NOTE_BEATS * 1000:.0f}ms)")
+              f"(max {max_beats} beat @ {bpm:.1f} BPM = "
+              f"{(60.0 / bpm) * max_beats * 1000:.0f}ms)")
 
     # ─────────────────────────────────────────────────────────────────────────
 
@@ -276,6 +277,9 @@ def main():
                         help="Disable BPM detection (MIDI will use default 120 BPM grid)")
     parser.add_argument("--no-max-note",     action="store_true",
                         help=f"Disable note length cap (default: {MAX_NOTE_BEATS} beat per note)")
+    parser.add_argument("--max-note-beats",  type=float, default=MAX_NOTE_BEATS,
+                        help=f"Max note duration in beats relative to detected BPM (default {MAX_NOTE_BEATS}). "
+                             "Ignored if --no-max-note is set.")
     args = parser.parse_args()
 
     input_path  = Path(args.input)
@@ -296,6 +300,7 @@ def main():
         "fix_overlaps":  not args.no_fix_overlaps,
         "detect_tempo":  not args.no_detect_tempo,
         "max_note":      not args.no_max_note,
+        "max_note_beats": args.max_note_beats,
     }
 
     transcribe(input_path, output_path, params)
