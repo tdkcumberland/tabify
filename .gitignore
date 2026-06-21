@@ -1,8 +1,7 @@
 **/*.mid
 **/*.wav
 
-tabify_old.py
-tabify-live_old.py
+/tabs
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
