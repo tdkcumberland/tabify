@@ -12,6 +12,7 @@ Tuned for:
 import sys
 import argparse
 import os
+import tempfile
 from pathlib import Path
 
 # ── Basic Pitch defaults (tuned for solo fingerstyle) ─────────────────────────
@@ -19,7 +20,7 @@ from pathlib import Path
 ONSET_THRESHOLD   = 0.6     # Lower = more notes. Raise to 0.6+ to cut ghost notes.
 FRAME_THRESHOLD   = 0.4     # Raise to 0.4+ if body percussion creates noise.
 MIN_NOTE_LENGTH   = 100.0   # ms. Percussion hits are <40ms; real notes sustain longer.
-MIN_FREQ          = 82.41   # Hz = E2 (open low E string)
+MIN_FREQ          = 61.74   # Hz = B1 — covers Drop D, Drop C, Drop B
 MAX_FREQ          = 1318.5  # Hz = E6 (practical guitar ceiling)
 CHORD_WINDOW      = 50.0    # ms. Notes within this window are snapped to the same onset.
                             # Collapses fast arpeggio sweeps into chords. 0 = disabled.
@@ -166,88 +167,101 @@ def transcribe(input_path: Path, output_path: Path, params: dict) -> None:
         import soundfile as sf
         import noisereduce as nr
         
-        audio_data, rate = librosa.load(str(input_path), sr=None, mono=True)
-        cleaned_audio = nr.reduce_noise(y=audio_data, sr=rate, prop_decrease=0.7, stationary=True)
-        
-        temp_path = input_path.with_name(f".temp_{input_path.stem}.wav")
-        sf.write(str(temp_path), cleaned_audio, rate)
-        actual_audio_path = str(temp_path)
+        try:
+            audio_data, rate = librosa.load(str(input_path), sr=None, mono=True)
+            cleaned_audio = nr.reduce_noise(y=audio_data, sr=rate, prop_decrease=0.7, stationary=True)
+            
+            # Use the same directory as input file for temp file
+            temp_dir = input_path.parent
+            temp_filename = input_path.stem + "_denoised_temp.wav"
+            temp_path = temp_dir / temp_filename
+            sf.write(str(temp_path), cleaned_audio, rate)
+            actual_audio_path = str(temp_path)
+        except Exception as e:
+            print(f"Warning: Could not create temporary file for denoising: {e}")
+            print("      Proceeding without denoising...")
+            temp_path = None
 
-    _, midi_data, note_events = predict(
-        audio_path=actual_audio_path,
-        model_or_model_path=ICASSP_2022_MODEL_PATH,
-        onset_threshold=params["onset"],
-        frame_threshold=params["frame"],
-        minimum_note_length=params["min_note"],
-        minimum_frequency=MIN_FREQ,
-        maximum_frequency=MAX_FREQ,
-        multiple_pitch_bends=not params["no_bends"],
-        melodia_trick=True,
-    )
+    try:
+        _, midi_data, note_events = predict(
+            audio_path=actual_audio_path,
+            model_or_model_path=ICASSP_2022_MODEL_PATH,
+            onset_threshold=params["onset"],
+            frame_threshold=params["frame"],
+            minimum_note_length=params["min_note"],
+            minimum_frequency=MIN_FREQ,
+            maximum_frequency=MAX_FREQ,
+            multiple_pitch_bends=not params["no_bends"],
+            melodia_trick=True,
+        )
 
-    if temp_path and os.path.exists(temp_path):
-        os.remove(temp_path)
+        note_count = len(note_events) if note_events else 0
+        print(f"      Detected {note_count} notes")
 
-    note_count = len(note_events) if note_events else 0
-    print(f"      Detected {note_count} notes")
+        # Create a single Acoustic Guitar track (Program 25 = Steel String)
+        single_track = pretty_midi.Instrument(program=25)
 
-    # Create a single Acoustic Guitar track (Program 25 = Steel String)
-    single_track = pretty_midi.Instrument(program=25)
+        for inst in midi_data.instruments:
+            single_track.notes.extend(inst.notes)
 
-    for inst in midi_data.instruments:
-        single_track.notes.extend(inst.notes)
+        single_track.notes.sort(key=lambda x: x.start)
 
-    single_track.notes.sort(key=lambda x: x.start)
+        # ── Tempo detection (before post-processing so BPM is available) ─────────
+        FALLBACK_BPM = 120.0
+        if params["detect_tempo"]:
+            bpm = detect_tempo(actual_audio_path)
+        else:
+            bpm = FALLBACK_BPM
 
-    # ── Tempo detection (before post-processing so BPM is available) ─────────
-    FALLBACK_BPM = 120.0
-    if params["detect_tempo"]:
-        bpm = detect_tempo(actual_audio_path)
-    else:
-        bpm = FALLBACK_BPM
+        # ── Post-processing ───────────────────────────────────────────────────────
+        print(f"[2/3] Post-processing...")
 
-    # ── Post-processing ───────────────────────────────────────────────────────
-    print(f"[2/3] Post-processing...")
+        # Chord quantization (always on — use --chord-window 0 to disable)
+        single_track.notes, groups = quantize_chords(single_track.notes, params["chord_window"])
+        if params["chord_window"] > 0:
+            print(f"      chord quantization  → {groups} group(s) collapsed")
 
-    # Chord quantization (always on — use --chord-window 0 to disable)
-    single_track.notes, groups = quantize_chords(single_track.notes, params["chord_window"])
-    if params["chord_window"] > 0:
-        print(f"      chord quantization  → {groups} group(s) collapsed")
+        # Duplicate removal
+        if params["dedup"]:
+            single_track.notes, dupes = remove_duplicates(single_track.notes)
+            print(f"      duplicate removal   → {dupes} duplicate(s) removed")
 
-    # Duplicate removal
-    if params["dedup"]:
-        single_track.notes, dupes = remove_duplicates(single_track.notes)
-        print(f"      duplicate removal   → {dupes} duplicate(s) removed")
+        # Overlap resolution
+        if params["fix_overlaps"]:
+            single_track.notes, overlaps = resolve_overlaps(single_track.notes)
+            print(f"      overlap resolution  → {overlaps} overlap(s) fixed")
 
-    # Overlap resolution
-    if params["fix_overlaps"]:
-        single_track.notes, overlaps = resolve_overlaps(single_track.notes)
-        print(f"      overlap resolution  → {overlaps} overlap(s) fixed")
+        # Note length cap
+        if params["max_note"]:
+            max_beats = params.get("max_note_beats", MAX_NOTE_BEATS)
+            single_track.notes, clipped = clip_note_lengths(single_track.notes, bpm, max_beats)
+            print(f"      note length cap     → {clipped} note(s) clipped  "
+                  f"(max {max_beats} beat @ {bpm:.1f} BPM = "
+                  f"{(60.0 / bpm) * max_beats * 1000:.0f}ms)")
 
-    # Note length cap
-    if params["max_note"]:
-        max_beats = params.get("max_note_beats", MAX_NOTE_BEATS)
-        single_track.notes, clipped = clip_note_lengths(single_track.notes, bpm, max_beats)
-        print(f"      note length cap     → {clipped} note(s) clipped  "
-              f"(max {max_beats} beat @ {bpm:.1f} BPM = "
-              f"{(60.0 / bpm) * max_beats * 1000:.0f}ms)")
+        # ─────────────────────────────────────────────────────────────────────────
 
-    # ─────────────────────────────────────────────────────────────────────────
+        midi_data.instruments = [single_track]
 
-    midi_data.instruments = [single_track]
+        # Apply detected BPM to MIDI header
+        if params["detect_tempo"]:
+            midi_data = apply_tempo_to_midi(midi_data, bpm)
+            print(f"      tempo              → {bpm:.1f} BPM")
 
-    # Apply detected BPM to MIDI header
-    if params["detect_tempo"]:
-        midi_data = apply_tempo_to_midi(midi_data, bpm)
-        print(f"      tempo              → {bpm:.1f} BPM")
-
-    print(f"[3/3] Writing MIDI: {output_path.name}")
-    midi_data.write(str(output_path))
-    size_kb = output_path.stat().st_size / 1024
-    print(f"\n✓  {output_path}  ({size_kb:.1f} KB)")
-    print("   Import into GP6: File → Import → MIDI")
-    print("   Tip: if noisy, re-run with --frame 0.4 or --min-note 100")
-    print("   Tip: if chords are still spread out, raise --chord-window (e.g. 80)")
+        print(f"[3/3] Writing MIDI: {output_path.name}")
+        midi_data.write(str(output_path))
+        size_kb = output_path.stat().st_size / 1024
+        print(f"\n✓  {output_path}  ({size_kb:.1f} KB)")
+        print("   Import into GP6: File → Import → MIDI")
+        print("   Tip: if noisy, re-run with --frame 0.4 or --min-note 100")
+        print("   Tip: if chords are still spread out, raise --chord-window (e.g. 80)")
+    finally:
+        # Clean up temporary file after transcription completes (or fails)
+        if temp_path and temp_path.exists():
+            try:
+                os.remove(temp_path)
+            except Exception as e:
+                print(f"Warning: Could not remove temporary file {temp_path}: {e}")
 
 
 def main():
